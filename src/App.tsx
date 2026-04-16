@@ -154,51 +154,53 @@ export default function App() {
   const handleExcelUpload = () => {
     const file = fileInputRef.current?.files?.[0];
     if (!file) {
-      setUploadStatus({ message: "⚠️ 파일을 먼저 선택해주세요!", type: "error" });
+      setUploadStatus({ message: "⚠️ 원본 엑셀 파일을 먼저 선택해주세요!", type: "error" });
       return;
     }
 
     setIsUploading(true);
-    setUploadStatus({ message: "⏳ 파일을 분석하고 있습니다...", type: "loading" });
+    setUploadStatus({ message: "🚀 엑셀 파일을 분석하고 클라우드에 전송 중입니다...<br/>잠시만 기다려주세요!", type: "loading" });
 
     const reader = new FileReader();
     reader.onload = (e) => {
-      try {
-        const data = new Uint8Array(e.target?.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: 'array' });
-        const firstSheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[firstSheetName];
-        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+      // 브라우저가 상태 메시지를 그릴 수 있도록 약간의 지연을 줍니다.
+      setTimeout(() => {
+        try {
+          const data = new Uint8Array(e.target?.result as ArrayBuffer);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
+          const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
 
-        const parsedData = parseWelfareData(jsonData);
-        
-        if (Object.values(parsedData).every(arr => arr.length === 0)) {
-          setUploadStatus({ message: "❌ 시간표 데이터를 찾지 못했습니다. 복지관 서식이 맞는지 확인해주세요.", type: "error" });
+          const parsedData = parseWelfareData(jsonData);
+          
+          if (Object.values(parsedData).every(arr => arr.length === 0)) {
+            setUploadStatus({ message: "❌ 시간표 데이터를 찾지 못했습니다. 복지관 서식이 맞는지 확인해주세요.", type: "error" });
+            setIsUploading(false);
+            return;
+          }
+
+          // 클라우드 동기화
+          set(ref(db, 'welfareSchedule'), parsedData)
+            .then(() => {
+              setUploadStatus({ message: "✅ 완벽하게 동기화되었습니다!", type: "success" });
+              setIsUploading(false);
+              alert("엑셀 시간표가 성공적으로 동기화되었습니다!\n화면 아래의 [전체 시간표 확인] 버튼을 눌러보세요.");
+              setTimeout(() => {
+                setUploadStatus({ message: "", type: "" });
+                setShowAdminPanel(false);
+              }, 3000);
+            })
+            .catch((error) => {
+              console.error("Firebase update failed", error);
+              setUploadStatus({ message: "❌ 전송 실패: " + (error instanceof Error ? error.message : String(error)), type: "error" });
+              setIsUploading(false);
+            });
+        } catch (error) {
+          setUploadStatus({ message: "❌ 엑셀 파일 읽기 오류: " + (error instanceof Error ? error.message : String(error)), type: "error" });
           setIsUploading(false);
-          return;
         }
-
-        setUploadStatus({ message: "🚀 클라우드에 데이터를 전송 중입니다...", type: "loading" });
-
-        // 클라우드 동기화
-        set(ref(db, 'welfareSchedule'), parsedData)
-          .then(() => {
-            setUploadStatus({ message: "✅ 동기화 완료! 모든 화면에 실시간 적용되었습니다.", type: "success" });
-            setIsUploading(false);
-            setTimeout(() => {
-              setUploadStatus({ message: "", type: "" });
-              setShowAdminPanel(false);
-            }, 3000);
-          })
-          .catch((error) => {
-            console.error("Firebase update failed", error);
-            setUploadStatus({ message: "❌ 전송 실패: " + (error instanceof Error ? error.message : String(error)), type: "error" });
-            setIsUploading(false);
-          });
-      } catch (error) {
-        setUploadStatus({ message: "❌ 파일 읽기 오류: " + (error instanceof Error ? error.message : String(error)), type: "error" });
-        setIsUploading(false);
-      }
+      }, 100);
     };
     reader.readAsArrayBuffer(file);
   };
@@ -417,15 +419,16 @@ export default function App() {
                       className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white py-3 rounded-xl font-bold shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2"
                     >
                       <Upload size={18} />
-                      {isUploading ? '처리 중...' : '클라우드 동기화'}
+                      {isUploading ? '⏳ 업로드 진행 중...' : '클라우드 동기화'}
                     </button>
                     {uploadStatus.message && (
-                      <div className={`text-xs font-bold mt-2 ${
-                        uploadStatus.type === 'success' ? 'text-emerald-600' : 
-                        uploadStatus.type === 'error' ? 'text-red-600' : 'text-amber-600'
-                      }`}>
-                        {uploadStatus.message}
-                      </div>
+                      <div 
+                        className={`text-xs font-bold mt-2 ${
+                          uploadStatus.type === 'success' ? 'text-emerald-600' : 
+                          uploadStatus.type === 'error' ? 'text-red-600' : 'text-amber-600'
+                        }`}
+                        dangerouslySetInnerHTML={{ __html: uploadStatus.message }}
+                      />
                     )}
                   </div>
                 </div>
@@ -596,13 +599,13 @@ export default function App() {
         </section>
 
         {/* Timetable Section */}
-        <section>
+        <section className="text-center">
           <button 
             onClick={() => setShowTimetable(!showTimetable)}
-            className="w-full md:w-auto flex items-center justify-center gap-3 bg-slate-100 hover:bg-slate-200 text-slate-800 px-6 py-3 rounded-xl font-bold transition-all border border-slate-200 mb-6 group"
+            className="inline-flex items-center justify-center gap-3 bg-slate-600 hover:bg-slate-700 text-white px-8 py-4 rounded-xl font-bold transition-all shadow-lg mb-8 group"
           >
-            <Calendar size={20} className="text-slate-500 group-hover:text-slate-800" />
-            📅 주간 프로그램 시간표 {showTimetable ? '접기' : '펼치기'}
+            <Calendar size={20} className="text-white/80 group-hover:text-white" />
+            👀 전체 시간표 클라우드 데이터 확인하기
             {showTimetable ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
           </button>
 
