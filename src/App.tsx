@@ -6,7 +6,7 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Clock, CheckCircle2, PlayCircle, Calendar, MapPin, ChevronDown, ChevronUp, Settings, Upload, X, AlertCircle } from 'lucide-react';
-import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 import { db } from './firebase';
 import { ref, onValue, set } from 'firebase/database';
 
@@ -147,73 +147,149 @@ export default function App() {
   }, [currentDay, currentMinutes, scheduleData, overrides]);
 
   // 2. 엑셀 분석 및 업로드 (스마트 스캐너 로직)
-  const handleCSVUpload = () => {
+  const handleExcelUpload = () => {
     const file = fileInputRef.current?.files?.[0];
     if (!file) {
       alert("파일을 먼저 선택해주세요!");
       return;
     }
 
-    Papa.parse(file, {
-      complete: (results) => {
-        const newData: Record<string, Array<{ day: string; start: string; end: string; name: string }>> = {};
-        let currentRoom: string | null = null;
-        let dayIndices: Record<string, number> = {};
-        const roomMap: Record<string, string> = {
-          "어울림실": "어울림실(B1)", 
-          "청춘나래": "청춘나래(F3/왼)", 
-          "청춘누리": "청춘누리(F3/오)", 
-          "청춘마루": "청춘마루(F4)"
-        };
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
 
-        (results.data as string[][]).forEach(row => {
-          const first = String(row[0] || "").trim();
-          if (first.includes("시간표")) {
-            for (let key in roomMap) { if (first.includes(key)) currentRoom = roomMap[key]; }
-            if (currentRoom && !newData[currentRoom]) newData[currentRoom] = [];
-            return;
-          }
-          if (currentRoom && row.includes("월") && row.includes("화")) {
-            dayIndices = {};
-            row.forEach((cell, i) => { if (["월","화","수","목","금"].includes(String(cell).trim())) dayIndices[String(cell).trim()] = i; });
-            return;
-          }
-          const timeMatch = first.match(/(\d{2}:\d{2})-(\d{2}:\d{2})/);
-          if (currentRoom && Object.keys(dayIndices).length > 0 && timeMatch) {
-            for (let day in dayIndices) {
-              const val = String(row[dayIndices[day]] || "").trim();
-              if (val) {
-                let s = timeMatch[1], e = timeMatch[2];
-                const cellTime = val.match(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/);
-                if (cellTime) { s = cellTime[1].padStart(5,'0'); e = cellTime[2].padStart(5,'0'); }
-                newData[currentRoom].push({ 
-                  day, 
-                  start: s, 
-                  end: e, 
-                  name: val.replace(/\d{1,2}:\d{2}.*/g, '').replace(/\n/g, ' ').trim() 
-                });
-              }
-            }
-          }
-        });
-
-        if (Object.keys(newData).length === 0) {
+        const parsedData = parseWelfareData(jsonData);
+        
+        if (Object.values(parsedData).every(arr => arr.length === 0)) {
           alert("시간표 데이터를 찾지 못했습니다. 복지관 서식이 맞는지 확인해주세요.");
           return;
         }
 
         // 클라우드 동기화
-        set(ref(db, 'welfareSchedule'), newData)
+        set(ref(db, 'welfareSchedule'), parsedData)
           .then(() => {
-            alert("전체 화면이 실시간으로 동기화되었습니다! 🚀");
+            alert("엑셀 시간표가 클라우드에 성공적으로 동기화되었습니다! 🚀");
             setShowAdminPanel(false);
           })
           .catch((error) => {
             console.error("Firebase update failed", error);
             alert("동기화 중 오류가 발생했습니다.");
           });
+      } catch (error) {
+        alert("엑셀 파일 읽기 오류: " + (error instanceof Error ? error.message : String(error)));
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const parseWelfareData = (data: any[][]) => {
+    const newData: Record<string, Array<{ day: string; start: string; end: string; name: string }>> = {
+      "어울림실(B1)": [], 
+      "청춘나래(F3/왼)": [], 
+      "청춘누리(F3/오)": [], 
+      "청춘마루(F4)": []
+    };
+
+    // 1. 그리드 형태 스캔 (요일/구분 헤더 방식)
+    let dayRow = -1;
+    let roomRow = -1;
+    
+    for(let i=0; i<Math.min(10, data.length); i++) {
+      if(data[i] && data[i][0] && String(data[i][0]).includes("요일")) dayRow = i;
+      if(data[i] && data[i][0] && String(data[i][0]).includes("구분")) roomRow = i;
+    }
+
+    if(dayRow !== -1 && roomRow !== -1) {
+      let daysMap: Record<number, string> = {};
+      let currentDay = "";
+      for(let c=1; c<data[dayRow].length; c++) {
+        let val = String(data[dayRow][c] || "").trim();
+        if(val && ["월","화","수","목","금"].includes(val)) currentDay = val;
+        if(currentDay) daysMap[c] = currentDay;
+      }
+
+      for(let r=roomRow+1; r<data.length; r++) {
+        let timeStr = String(data[r][0] || "").trim();
+        let timeMatch = timeStr.match(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/);
+        if(!timeMatch) continue;
+        
+        let start = timeMatch[1].padStart(5, '0');
+        let end = timeMatch[2].padStart(5, '0');
+
+        for(let c=1; c<data[r].length; c++) {
+          let prog = String(data[r][c] || "").trim();
+          let roomRaw = String(data[roomRow][c] || "").replace(/\n/g, '').trim();
+          let day = daysMap[c];
+
+          if(!prog || !day || !roomRaw) continue;
+
+          let roomKey = null;
+          if(roomRaw.includes("어울림")) roomKey = "어울림실(B1)";
+          if(roomRaw.includes("나래")) roomKey = "청춘나래(F3/왼)";
+          if(roomRaw.includes("누리")) roomKey = "청춘누리(F3/오)";
+          if(roomRaw.includes("마루")) roomKey = "청춘마루(F4)";
+
+          if(roomKey) {
+            let actualStart = start, actualEnd = end;
+            const cellTime = prog.match(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/);
+            if (cellTime) {
+              actualStart = cellTime[1].padStart(5, '0');
+              actualEnd = cellTime[2].padStart(5, '0');
+            }
+            let cleanName = prog.replace(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/g, '').replace(/\n/g, ' ').trim();
+            newData[roomKey].push({day: day, start: actualStart, end: actualEnd, name: cleanName});
+          }
+        }
+      }
+      return newData;
+    }
+
+    // 2. 기존 방식 스캔 (시간표 키워드 방식)
+    let currentRoom: string | null = null;
+    let dayIndices: Record<string, number> = {};
+    const roomMap: Record<string, string> = {
+      "어울림실": "어울림실(B1)", 
+      "청춘나래": "청춘나래(F3/왼)", 
+      "청춘누리": "청춘누리(F3/오)", 
+      "청춘마루": "청춘마루(F4)"
+    };
+
+    data.forEach(row => {
+      const first = String(row[0] || "").trim();
+      if (first.includes("시간표")) {
+        for (let key in roomMap) { if (first.includes(key)) currentRoom = roomMap[key]; }
+        return;
+      }
+      if (currentRoom && row.includes("월") && row.includes("화")) {
+        dayIndices = {};
+        row.forEach((cell, i) => { if (["월","화","수","목","금"].includes(String(cell || "").trim())) dayIndices[String(cell).trim()] = i; });
+        return;
+      }
+      const timeMatch = first.match(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/);
+      if (currentRoom && Object.keys(dayIndices).length > 0 && timeMatch) {
+        for (let day in dayIndices) {
+          const val = String(row[dayIndices[day]] || "").trim();
+          if (val) {
+            let s = timeMatch[1].padStart(5,'0'), e = timeMatch[2].padStart(5,'0');
+            const cellTime = val.match(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/);
+            if (cellTime) { s = cellTime[1].padStart(5,'0'); e = cellTime[2].padStart(5,'0'); }
+            newData[currentRoom].push({ 
+              day, 
+              start: s, 
+              end: e, 
+              name: val.replace(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/g, '').replace(/\n/g, ' ').trim() 
+            });
+          }
+        }
       }
     });
+
+    return newData;
   };
 
   const handleManualOverride = () => {
@@ -286,7 +362,7 @@ export default function App() {
                   </button>
                 </div>
                 <p className="text-amber-800/70 text-sm leading-relaxed">
-                  복지관 원본 엑셀 시간표를 <strong>"CSV UTF-8 (쉼표로 분리)"</strong> 형식으로 저장 후 올려주세요.
+                  복지관 원본 엑셀 파일(<strong>.xlsx, .xls, .csv</strong>)을 그대로 올려주세요.
                 </p>
                 <p className="text-red-600 text-xs mt-2 font-bold">
                   (클라우드 동기화 버튼을 누르면 모든 화면이 실시간으로 업데이트됩니다!)
@@ -308,7 +384,7 @@ export default function App() {
                       <input 
                         type="file" 
                         ref={fileInputRef}
-                        accept=".csv" 
+                        accept=".xlsx, .xls, .csv" 
                         className="hidden" 
                         id="csv-upload"
                       />
@@ -316,11 +392,11 @@ export default function App() {
                         htmlFor="csv-upload"
                         className="inline-flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer transition-colors shadow-sm text-sm"
                       >
-                        원본 CSV 파일 선택
+                        원본 엑셀 파일 선택
                       </label>
                     </div>
                     <button 
-                      onClick={handleCSVUpload}
+                      onClick={handleExcelUpload}
                       className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2"
                     >
                       <Upload size={18} />
