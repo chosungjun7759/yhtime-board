@@ -19,7 +19,7 @@ const defaultScheduleData: Record<string, Array<{ day: string; start: string; en
     { day: "목", start: "09:00", end: "10:00", name: "디지털 서포터즈" },
     { day: "금", start: "09:00", end: "10:00", name: "디지털 서포터즈" }
   ],
-  "청춘나래(F3/왼)": [
+  "청춘나래(F3-왼)": [
     { day: "월", start: "10:00", end: "11:00", name: "칼림바" },
     { day: "월", start: "15:00", end: "16:00", name: "오카리나 초급" },
     { day: "화", start: "10:00", end: "11:00", name: "생활영어회화" },
@@ -27,7 +27,7 @@ const defaultScheduleData: Record<string, Array<{ day: string; start: string; en
     { day: "금", start: "11:00", end: "12:00", name: "스마트폰 중급" },
     { day: "금", start: "16:00", end: "17:00", name: "오카리나 중급" }
   ],
-  "청춘누리(F3/오)": [
+  "청춘누리(F3-오)": [
     { day: "월", start: "10:00", end: "11:00", name: "칼림바" },
     { day: "월", start: "13:00", end: "14:00", name: "미술동아리" },
     { day: "월", start: "15:00", end: "16:00", name: "오카리나 초급" },
@@ -63,6 +63,10 @@ export default function App() {
   const [scheduleData, setScheduleData] = useState<Record<string, Array<{ day: string; start: string; end: string; name: string }>>>(defaultScheduleData);
   const [overrides, setOverrides] = useState<Record<string, { status: 'auto' | 'available' | 'in-use'; name?: string; time?: string }>>({});
   
+  // 업로드 상태
+  const [uploadStatus, setUploadStatus] = useState<{ message: string; type: 'success' | 'error' | 'loading' | '' }>({ message: '', type: '' });
+  const [isUploading, setIsUploading] = useState(false);
+
   // 수동 제어 필드 상태
   const [manualRoom, setManualRoom] = useState("어울림실(B1)");
   const [manualStatus, setManualStatus] = useState<'auto' | 'available' | 'in-use'>("auto");
@@ -102,7 +106,7 @@ export default function App() {
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
   const roomStatus = useMemo(() => {
-    const rooms = ["어울림실(B1)", "청춘나래(F3/왼)", "청춘누리(F3/오)", "청춘마루(F4)"];
+    const rooms = ["어울림실(B1)", "청춘나래(F3-왼)", "청춘누리(F3-오)", "청춘마루(F4)"];
     
     return rooms.map(roomName => {
       const manual = overrides[roomName];
@@ -150,9 +154,12 @@ export default function App() {
   const handleExcelUpload = () => {
     const file = fileInputRef.current?.files?.[0];
     if (!file) {
-      alert("파일을 먼저 선택해주세요!");
+      setUploadStatus({ message: "⚠️ 파일을 먼저 선택해주세요!", type: "error" });
       return;
     }
+
+    setIsUploading(true);
+    setUploadStatus({ message: "⏳ 파일을 분석하고 있습니다...", type: "loading" });
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -166,22 +173,31 @@ export default function App() {
         const parsedData = parseWelfareData(jsonData);
         
         if (Object.values(parsedData).every(arr => arr.length === 0)) {
-          alert("시간표 데이터를 찾지 못했습니다. 복지관 서식이 맞는지 확인해주세요.");
+          setUploadStatus({ message: "❌ 시간표 데이터를 찾지 못했습니다. 복지관 서식이 맞는지 확인해주세요.", type: "error" });
+          setIsUploading(false);
           return;
         }
+
+        setUploadStatus({ message: "🚀 클라우드에 데이터를 전송 중입니다...", type: "loading" });
 
         // 클라우드 동기화
         set(ref(db, 'welfareSchedule'), parsedData)
           .then(() => {
-            alert("엑셀 시간표가 클라우드에 성공적으로 동기화되었습니다! 🚀");
-            setShowAdminPanel(false);
+            setUploadStatus({ message: "✅ 동기화 완료! 모든 화면에 실시간 적용되었습니다.", type: "success" });
+            setIsUploading(false);
+            setTimeout(() => {
+              setUploadStatus({ message: "", type: "" });
+              setShowAdminPanel(false);
+            }, 3000);
           })
           .catch((error) => {
             console.error("Firebase update failed", error);
-            alert("동기화 중 오류가 발생했습니다.");
+            setUploadStatus({ message: "❌ 전송 실패: " + (error instanceof Error ? error.message : String(error)), type: "error" });
+            setIsUploading(false);
           });
       } catch (error) {
-        alert("엑셀 파일 읽기 오류: " + (error instanceof Error ? error.message : String(error)));
+        setUploadStatus({ message: "❌ 파일 읽기 오류: " + (error instanceof Error ? error.message : String(error)), type: "error" });
+        setIsUploading(false);
       }
     };
     reader.readAsArrayBuffer(file);
@@ -190,8 +206,8 @@ export default function App() {
   const parseWelfareData = (data: any[][]) => {
     const newData: Record<string, Array<{ day: string; start: string; end: string; name: string }>> = {
       "어울림실(B1)": [], 
-      "청춘나래(F3/왼)": [], 
-      "청춘누리(F3/오)": [], 
+      "청춘나래(F3-왼)": [], 
+      "청춘누리(F3-오)": [], 
       "청춘마루(F4)": []
     };
 
@@ -230,8 +246,8 @@ export default function App() {
 
           let roomKey = null;
           if(roomRaw.includes("어울림")) roomKey = "어울림실(B1)";
-          if(roomRaw.includes("나래")) roomKey = "청춘나래(F3/왼)";
-          if(roomRaw.includes("누리")) roomKey = "청춘누리(F3/오)";
+          if(roomRaw.includes("나래")) roomKey = "청춘나래(F3-왼)";
+          if(roomRaw.includes("누리")) roomKey = "청춘누리(F3-오)";
           if(roomRaw.includes("마루")) roomKey = "청춘마루(F4)";
 
           if(roomKey) {
@@ -254,8 +270,8 @@ export default function App() {
     let dayIndices: Record<string, number> = {};
     const roomMap: Record<string, string> = {
       "어울림실": "어울림실(B1)", 
-      "청춘나래": "청춘나래(F3/왼)", 
-      "청춘누리": "청춘누리(F3/오)", 
+      "청춘나래": "청춘나래(F3-왼)", 
+      "청춘누리": "청춘누리(F3-오)", 
       "청춘마루": "청춘마루(F4)"
     };
 
@@ -397,11 +413,20 @@ export default function App() {
                     </div>
                     <button 
                       onClick={handleExcelUpload}
-                      className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2"
+                      disabled={isUploading}
+                      className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white py-3 rounded-xl font-bold shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2"
                     >
                       <Upload size={18} />
-                      클라우드 동기화
+                      {isUploading ? '처리 중...' : '클라우드 동기화'}
                     </button>
+                    {uploadStatus.message && (
+                      <div className={`text-xs font-bold mt-2 ${
+                        uploadStatus.type === 'success' ? 'text-emerald-600' : 
+                        uploadStatus.type === 'error' ? 'text-red-600' : 'text-amber-600'
+                      }`}>
+                        {uploadStatus.message}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -421,8 +446,8 @@ export default function App() {
                           className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                         >
                           <option value="어울림실(B1)">어울림실(B1)</option>
-                          <option value="청춘나래(F3/왼)">청춘나래(F3/왼)</option>
-                          <option value="청춘누리(F3/오)">청춘누리(F3/오)</option>
+                          <option value="청춘나래(F3-왼)">청춘나래(F3-왼)</option>
+                          <option value="청춘누리(F3-오)">청춘누리(F3-오)</option>
                           <option value="청춘마루(F4)">청춘마루(F4)</option>
                         </select>
                       </div>
