@@ -264,14 +264,20 @@ export default function App() {
         const cs = String(cv).trim();
         // 👉 [핵심 수정 부분] 쓰레기 데이터 걸러내기
         if (/^\d+$/.test(cs) || /^\d+월$/.test(cs) || cs === '개') continue;
-        // '정원', '16석', '20명' 등의 좌석/인원수 관련 단어 무시
-        if (cs === '정원' || /^\d+석$/.test(cs) || /^\d+명$/.test(cs)) continue;
-        if (cs.indexOf('예정') >= 0 || cs.indexOf('특강') >= 0) continue;
+        
+        // 부가정보 셀 완전 차단 (정원·석수·장소명·강의실명 등)
+        const JUNK = ['강의실명', '장소', '정원', '어울림실', '청춘나래', '청춘누리', '청춘마루', 'B1', 'F3', 'F3/왼', 'F3/오', 'F4'];
+        if (JUNK.indexOf(cs) >= 0) continue;
+        if (/^\d+석$/.test(cs)) continue;   // "16석" "20석" "12석"
+        if (/^[*★▶◆■□○●]+$/.test(cs)) continue; // 기호만 있는 셀
 
         const fd = (mdDay[ci] != null) ? String(mdDay[ci]).trim() : null;
         if (!fd || DAY_LIST.indexOf(fd) < 0) continue;
         const rk = rmap[ci];
         if (!rk) continue;
+
+        // 특강은 제외, 예정은 허용 (시간표에 포함)
+        if (cs.indexOf('특강') >= 0) continue;
 
         let fs = cS, fe = cE;
         const inner = cs.match(/(\d{1,2}[:\uff1a]\d{2})\s*[-~]\s*(\d{1,2}[:\uff1a]\d{2})/);
@@ -281,7 +287,11 @@ export default function App() {
         }
 
         const pn = cs.replace(/(\d{1,2}[:\uff1a]\d{2})\s*[-~]\s*(\d{1,2}[:\uff1a]\d{2})/g, '')
-          .replace(/\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+          .replace(/\n/g, ' ')
+          .replace(/[\(\[（【]?예정[\)\]）】]?/g, '')  // "(예정)" "예정" 제거
+          .replace(/[\(\[（【][^\)\]）】]*$/, '')       // 닫히지 않은 괄호 제거 e.g. "(4월"
+          .replace(/\s*\d+월\s*/g, ' ')                 // 잔여 "3월" "4월" 텍스트 제거
+          .replace(/\s{2,}/g, ' ').trim();
         if (!pn) continue;
 
         const isDup = res[rk].some(p => p.day === fd && p.start === fs && p.name === pn);
@@ -317,7 +327,7 @@ export default function App() {
             <div className="flex items-center gap-2 mt-1">
               <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green animate-pulse shadow-[0_0_8px_rgba(0,214,143,0.5)]' : 'bg-red'}`} />
               <span className="text-[10px] font-black tracking-widest uppercase opacity-60">
-                {isConnected ? 'Realtime Connected' : 'Sync Disconnected'}
+                {isConnected ? 'Realtime Connected — 모든 기기와 실시간 동기화 중' : 'Sync Disconnected — 인터넷 연결을 확인하세요'}
               </span>
             </div>
           </div>
@@ -379,16 +389,16 @@ export default function App() {
                           <h3 className="font-bold text-sm">{room.label}</h3>
                         </div>
                         {room.isManualActive && (
-                          <span className="text-[10px] font-black bg-purple/10 text-purple px-2 py-0.5 rounded-full uppercase tracking-widest">Manual</span>
+                          <span className="text-[10px] font-black bg-purple/14 text-purple px-2 py-0.5 rounded-full uppercase tracking-widest">Manual</span>
                         )}
                         <span className="text-[10px] font-bold text-text-dim bg-surface-2 px-2 py-0.5 rounded-full uppercase">{room.floor}</span>
                       </div>
                       <div className="p-5 space-y-4">
                         <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase ${
-                          room.active ? (room.isManualActive ? 'bg-purple/10 text-purple' : 'bg-accent/10 text-accent') : 'bg-green/10 text-green'
+                          room.isManualActive ? 'bg-purple/14 text-purple' : (room.active ? 'bg-accent/14 text-accent' : 'bg-green/11 text-green')
                         }`}>
                           <div className={`w-1.5 h-1.5 rounded-full bg-current ${room.active ? 'animate-pulse' : ''}`} />
-                          {room.active ? 'In Use' : 'Available'}
+                          {room.isManualActive ? '수동 운영 중' : (room.active ? '운영 중' : '사용 가능')}
                         </div>
                         <div className="min-h-[3rem]">
                           {room.active ? (
@@ -443,13 +453,13 @@ export default function App() {
                 className="space-y-6"
               >
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-surface/50 p-6 rounded-3xl border border-white/5">
-                  <p className="text-sm font-medium text-text-dim">
-                    실시간 현황판에 특정 프로그램을 즉시 노출하고 싶을 때 사용합니다.<br/>
-                    설정 즉시 모든 연결된 화면에 반영되며, 수동 해제 전까지는 자동 시간표보다 우선 상위 노출됩니다.
+                  <p className="text-sm font-medium text-text-dim leading-relaxed">
+                    프로그램실 상태를 즉시 수동 변경할 수 있습니다.<br/>
+                    설정 즉시 모든 연결된 화면에 실시간으로 반영됩니다.
                   </p>
                   <button 
                     onClick={clearAllManual}
-                    className="bg-red/10 text-red hover:bg-red/20 border border-red/20 px-6 py-2.5 rounded-xl text-sm font-black transition-all"
+                    className="bg-red/14 text-red hover:bg-red/26 border border-red/22 px-6 py-2.5 rounded-xl text-sm font-black transition-all"
                   >
                     🗑 모든 수동 제어 전체 해제
                   </button>
@@ -457,36 +467,36 @@ export default function App() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {ROOMS.map((room) => {
                     const isManual = !!manualOv[room.key]?.active;
+                    const cur = manualOv[room.key];
                     return (
-                      <div key={room.key} className={`bg-surface p-6 rounded-3xl border ${isManual ? 'border-purple/30' : 'border-white/5'} space-y-6`}>
+                      <div key={room.key} className={`bg-surface p-6 rounded-3xl border ${isManual ? 'border-purple/40' : 'border-white/5'} space-y-5 transition-all`}>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <div className="w-2.5 h-2.5 rounded-full shadow-lg" style={{ background: room.color, boxShadow: `0 0 15px ${room.color}44` }} />
                             <h3 className="text-xl font-bold">{room.label}</h3>
                           </div>
-                          {isManual && (
-                            <span className="text-[10px] font-black bg-purple/10 text-purple px-3 py-1 rounded-full uppercase tracking-widest border border-purple/20">Active Manual Control</span>
-                          )}
+                          <span className="text-[10px] font-bold text-text-dim bg-surface-2 px-2 py-0.5 rounded-full uppercase">{room.floor}</span>
                         </div>
                         
                         {isManual && (
-                          <div className="bg-purple/5 border border-purple/10 rounded-2xl p-4 animate-in zoom-in-95">
-                            <p className="text-xs font-bold text-purple uppercase tracking-widest mb-2 opacity-60">현재 수동 운영 중</p>
-                            <h4 className="text-lg font-bold">{manualOv[room.key].name}</h4>
-                            <p className="text-xs font-medium text-text-dim">{manualOv[room.key].start} ~ {manualOv[room.key].end}</p>
+                          <div className="bg-purple/10 border border-purple/18 rounded-2xl p-4 animate-in zoom-in-95">
+                            <p className="text-[10px] font-black text-purple uppercase tracking-[0.2em] mb-2 opacity-60">현재 수동 운영 중</p>
+                            <h4 className="text-lg font-bold">📌 {cur.name}</h4>
+                            <p className="text-xs font-medium text-text-dim mt-1">{cur.start} ~ {cur.end}</p>
                           </div>
                         )}
 
                         <div className="space-y-4">
                           <div className="space-y-1.5">
-                            <label className="text-[10px] font-black text-text-dim uppercase tracking-widest ml-1">프로그램명</label>
+                            <label className="text-[10px] font-black text-text-dim uppercase tracking-widest ml-1">프로그램명 *</label>
                             <input 
                               id={`mn-name-${room.key}`}
                               type="text" 
-                              placeholder="예: 노래교실, 긴급 행사..."
+                              placeholder="예: 노래교실, 특별 행사..."
                               value={manualInputs[room.key].name}
                               onChange={(e) => handleManualInput(room.key, 'name', e.target.value)}
-                              className="w-full bg-surface-2 border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                              onKeyDown={(e) => e.key === 'Enter' && applyManual(room.key)}
+                              className="w-full bg-surface-2 border border-white/13 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
                             />
                           </div>
                           <div className="grid grid-cols-2 gap-4">
@@ -496,7 +506,7 @@ export default function App() {
                                 type="time" 
                                 value={manualInputs[room.key].start}
                                 onChange={(e) => handleManualInput(room.key, 'start', e.target.value)}
-                                className="w-full bg-surface-2 border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                                className="w-full bg-surface-2 border border-white/13 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
                               />
                             </div>
                             <div className="space-y-1.5">
@@ -505,7 +515,7 @@ export default function App() {
                                 type="time" 
                                 value={manualInputs[room.key].end}
                                 onChange={(e) => handleManualInput(room.key, 'end', e.target.value)}
-                                className="w-full bg-surface-2 border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                                className="w-full bg-surface-2 border border-white/13 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
                               />
                             </div>
                           </div>
@@ -514,7 +524,7 @@ export default function App() {
                               onClick={() => applyManual(room.key)}
                               className="flex-[2] bg-accent hover:bg-accent/90 text-white p-3.5 rounded-xl font-black text-sm transition-all active:scale-95 shadow-lg shadow-accent/20"
                             >
-                              설정 적용
+                              ✅ 즉시 적용
                             </button>
                             <button 
                               onClick={() => clearManual(room.key)}
@@ -544,7 +554,7 @@ export default function App() {
                 className="max-w-3xl mx-auto space-y-6"
               >
                 <div className="bg-surface p-10 rounded-[2.5rem] border border-white/5 shadow-2xl relative overflow-hidden">
-                  <div className="absolute top-0 left-0 w-1 h-full bg-accent" />
+                  <div className="absolute top-0 left-0 w-1.5 h-full bg-accent" />
                   <div className="space-y-8">
                     <div className="space-y-2">
                         <h3 className="text-3xl font-black text-white">시간표 클라우드 동기화</h3>
@@ -563,7 +573,7 @@ export default function App() {
                         />
                         <div className="text-center space-y-1">
                             <p className="text-xs font-bold text-text-dim">파일 지원: Microsoft Excel (.xlsx, .xls)</p>
-                            <p className="text-xs font-bold text-accent/50">첫 번째 시트의 내용을 자동으로 분석합니다.</p>
+                            <p className="text-xs font-bold text-accent/50">첫 번째 시트(통합표)를 자동으로 읽습니다.</p>
                         </div>
                     </div>
 
@@ -573,13 +583,13 @@ export default function App() {
                             disabled={isUploading}
                             className="w-full bg-accent hover:bg-accent/90 disabled:bg-surface-3 disabled:text-text-dim p-4.5 rounded-2xl font-black text-lg shadow-xl shadow-accent/20 transition-all active:scale-95"
                         >
-                            {isUploading ? '분석 중...' : '클라우드로 데이터 전송'}
+                            {isUploading ? '🚀 엑셀 파일 분석 중...' : '클라우드 동기화'}
                         </button>
                         <button 
                             onClick={clearAllSchedule}
-                            className="w-full bg-white/5 hover:bg-red/10 hover:text-red p-3 rounded-xl text-xs font-bold text-text-dim transition-all"
+                            className="w-full bg-red/14 text-red hover:bg-red/26 border border-red/22 p-3 rounded-xl text-xs font-bold transition-all"
                         >
-                            저장된 통합 시간표 전체 초기화
+                            🗑 저장된 시간표 전체 초기화
                         </button>
                     </div>
 
@@ -588,9 +598,9 @@ export default function App() {
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         className={`p-4 rounded-xl text-sm font-bold flex items-center gap-3 ${
-                            uploadStatus.type === 'loading' ? 'bg-accent/10 text-accent border border-accent/20' :
-                            uploadStatus.type === 'success' ? 'bg-green/10 text-green border border-green/20' :
-                            'bg-red/10 text-red border border-red/20'
+                            uploadStatus.type === 'loading' ? 'bg-accent/11 text-accent border border-accent/22' :
+                            uploadStatus.type === 'success' ? 'bg-green/11 text-green border border-green/22' :
+                            'bg-red/11 text-red border border-red/22'
                         }`}
                     >
                         {uploadStatus.type === 'loading' && <div className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />}
@@ -600,17 +610,16 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-surface/30 p-8 rounded-3xl border border-white/5 space-y-4">
-                    <h4 className="text-xs font-black text-text-dim uppercase tracking-[0.2em] flex items-center gap-2">
-                        <Database size={14} />
-                        Guidelines for Excel Format
+                <div className="bg-surface p-8 rounded-3xl border border-white/5 space-y-4">
+                    <h4 className="text-[0.82rem] font-bold text-text-dim uppercase tracking-[0.05em] flex items-center gap-2">
+                        📋 엑셀 파일 형식 안내
                     </h4>
-                    <ul className="text-xs text-text-dim font-medium space-y-2 list-disc ml-5 leading-loose">
-                        <li>복지관 전체 시간표 서식에서 <strong>'요일'</strong> 행과 <strong>'구분'</strong> 행을 반드시 포함해야 합니다.</li>
-                        <li>방 이름 키워드(어울림실, 청춘나래 등)가 포함된 열을 자동으로 인식합니다.</li>
-                        <li>엑셀의 <strong>병합된 셀</strong>도 스마트하게 인식하여 모든 시간대에 프로그램이 매핑됩니다.</li>
-                        <li>업로드가 완료되면 실시간 대시보드 및 검수 탭에서 확인 가능합니다.</li>
-                    </ul>
+                    <div className="text-[0.81rem] text-text-dim font-medium space-y-2 leading-[1.9]">
+                        <p>• 첫 번째 시트(통합표)를 자동으로 읽습니다.</p>
+                        <p>• <code>요일</code> 행과 <code>구분</code> 행이 반드시 있어야 합니다.</p>
+                        <p>• 병합 셀을 자동으로 확장 처리합니다.</p>
+                        <p>• 업로드 즉시 연결된 모든 기기에 실시간 반영됩니다.</p>
+                    </div>
                 </div>
               </motion.div>
             )}
@@ -625,46 +634,43 @@ export default function App() {
                 className="space-y-6"
               >
                 <div className="flex items-center justify-between">
-                    <h3 className="text-xl font-black text-white flex items-center gap-3">
-                        <Database className="text-accent" />
-                        클라우드 통합 데이터 검수
-                    </h3>
-                    <div className="px-5 py-2.5 bg-accent/10 border border-accent/20 rounded-full text-accent text-sm font-black tabular-nums">
+                    <h3 className="text-[0.82rem] font-bold text-text-dim uppercase tracking-[0.05em]">현재 클라우드에 저장된 시간표 전체</h3>
+                    <div className="text-[0.81rem] font-bold text-accent">
                         총 {Object.values(scheduleData).flat().length}개 프로그램 동기화 중
                     </div>
                 </div>
 
-                <div className="bg-surface rounded-3xl border border-white/5 overflow-hidden shadow-2xl">
+                <div className="bg-surface rounded-xl border border-white/5 overflow-hidden shadow-2xl">
                     <div className="overflow-x-auto">
                         <table className="w-full border-collapse">
                             <thead>
-                                <tr className="bg-surface-2 text-text-dim text-[11px] font-black uppercase tracking-wider">
-                                    <th className="py-5 px-6 text-left">Room</th>
-                                    <th className="py-5 px-6 text-center">Day</th>
-                                    <th className="py-5 px-6 text-center">Schedule</th>
-                                    <th className="py-5 px-6 text-left">Program Name</th>
+                                <tr className="bg-surface-2 text-text-dim text-[0.71rem] font-bold uppercase tracking-widest">
+                                    <th className="py-2.5 px-3 text-left">방</th>
+                                    <th className="py-2.5 px-3 text-center">요일</th>
+                                    <th className="py-2.5 px-3 text-center">시간</th>
+                                    <th className="py-2.5 px-3 text-left">프로그램</th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-white/5">
+                            <tbody className="divide-y divide-white/5 text-[0.81rem]">
                                 {(Object.entries(scheduleData) as [string, ScheduleItem[]][]).flatMap(([roomName, progs]) => 
                                     progs.sort((a,b) => (DAY_LIST.indexOf(a.day) - DAY_LIST.indexOf(b.day)) || (toMin(a.start) - toMin(b.start))).map((p, i) => (
                                         <tr key={`${roomName}-${i}`} className="hover:bg-white/[0.02] transition-colors">
-                                            <td className="py-4 px-6">
-                                                <div className="flex items-center gap-3">
-                                                    <div className="w-2 h-2 rounded-full" style={{ background: ROOMS.find(r => r.key === roomName)?.color }} />
-                                                    <span className="font-black text-sm">{roomName}</span>
+                                            <td className="py-2 px-3">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="w-1.5 h-1.5 rounded-full" style={{ background: ROOMS.find(r => r.key === roomName)?.color }} />
+                                                    <span className="font-medium">{roomName}</span>
                                                 </div>
                                             </td>
-                                            <td className="py-4 px-6 text-center">
-                                                <span className="inline-block px-3 py-1 rounded-lg text-[10px] font-black uppercase" style={{ background: (DAY_CLR[p.day] || '#888') + '22', color: DAY_CLR[p.day] }}>
+                                            <td className="py-2 px-3 text-center">
+                                                <span className="inline-block px-2 py-0.5 rounded-xl text-[0.71rem] font-bold" style={{ background: (DAY_CLR[p.day] || '#888') + '22', color: DAY_CLR[p.day] }}>
                                                     {p.day}
                                                 </span>
                                             </td>
-                                            <td className="py-4 px-6 text-center text-xs font-mono text-text-dim tracking-tight tabular-nums">
+                                            <td className="py-2 px-3 text-center text-text-dim text-[0.78rem] tabular-nums">
                                                 {p.start} ~ {p.end}
                                             </td>
-                                            <td className="py-4 px-6">
-                                                <div className="text-sm font-bold text-white/80">{p.name}</div>
+                                            <td className="py-2 px-3">
+                                                <div className="font-medium text-white/90">{p.name}</div>
                                             </td>
                                         </tr>
                                     ))
@@ -674,7 +680,7 @@ export default function App() {
                                         <td colSpan={4} className="py-24 text-center">
                                             <div className="flex flex-col items-center gap-4 opacity-20">
                                                 <Database size={60} strokeWidth={1} />
-                                                <p className="text-lg font-medium italic">클라우드에 저장된 데이터가 없습니다.</p>
+                                                <p className="text-lg font-medium italic">데이터 없음 — 시간표를 업로드하세요</p>
                                             </div>
                                         </td>
                                     </tr>
