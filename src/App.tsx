@@ -1,12 +1,21 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { Clock, CheckCircle2, PlayCircle, Calendar, Settings, Upload, MapPin, ChevronDown, ChevronUp, Database } from 'lucide-react';
+import { Clock, CheckCircle2, PlayCircle, Calendar, Settings, Upload, MapPin, ChevronDown, ChevronUp, Database, Trash2, Edit3, Wifi, WifiOff } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { db } from './firebase';
-import { ref, onValue, set } from 'firebase/database';
+import { ref, onValue, set, remove, goOnline, goOffline } from 'firebase/database';
 import { motion, AnimatePresence } from 'motion/react';
 
-// 정제된 방 이름 목록 (하이픈 사용)
-const ROOMS = ["어울림실(B1)", "청춘나래(F3-왼)", "청춘누리(F3-오)", "청춘마루(F4)"];
+// ── 상수 정의 ──
+const ROOMS = [
+  { key: '어울림실', label: '어울림실', floor: 'B1',    color: '#4f8ef7', keywords: ['어울림실'] },
+  { key: '청춘나래', label: '청춘나래', floor: 'F3 왼', color: '#00d68f', keywords: ['청춘나래'] },
+  { key: '청춘누리', label: '청춘누리', floor: 'F3 오', color: '#ff7043', keywords: ['청춘누리'] },
+  { key: '청춘마루', label: '청춘마루', floor: 'F4',    color: '#ffd740', keywords: ['청춘마루'] }
+];
+
+const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
+const DAY_LIST = ['월', '화', '수', '목', '금'];
+const DAY_CLR: Record<string, string> = { '월': '#4f8ef7', '화': '#00d68f', '수': '#ffd740', '목': '#ff7043', '금': '#b084f7' };
 
 interface ScheduleItem {
   day: string;
@@ -16,138 +25,176 @@ interface ScheduleItem {
 }
 
 interface ManualOverride {
-  status: 'auto' | 'available' | 'in-use';
-  name?: string;
-  time?: string;
+  active: boolean;
+  name: string;
+  start: string;
+  end: string;
+  updatedAt: number;
 }
 
+type TabType = 'dashboard' | 'manual' | 'upload' | 'check';
+
 export default function App() {
+  const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [scheduleData, setScheduleData] = useState<Record<string, ScheduleItem[]>>({});
-  const [overrides, setOverrides] = useState<Record<string, ManualOverride>>({});
+  const [manualOv, setManualOv] = useState<Record<string, ManualOverride>>({});
   const [currentTime, setCurrentTime] = useState(new Date());
-  const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [showTimetable, setShowTimetable] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
   
-  // 업로드 상태 관리
+  // 업로드 상태
   const [uploadStatus, setUploadStatus] = useState<{ message: string; type: 'success' | 'error' | 'loading' | '' }>({ message: '', type: '' });
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 수동 제어 폼 상태
-  const [manualRoom, setManualRoom] = useState(ROOMS[0]);
-  const [manualStatusType, setManualStatusType] = useState<'auto' | 'available' | 'in-use'>('auto');
-  const [manualName, setManualName] = useState('');
-  const [manualTime, setManualTime] = useState('');
+  // 수동 제어 입력 상태 (방별로 관리)
+  const [manualInputs, setManualInputs] = useState<Record<string, { name: string, start: string, end: string }>>(
+    Object.fromEntries(ROOMS.map(r => [r.key, { name: '', start: '', end: '' }]))
+  );
 
-  // 1. 실시간 클라우드 데이터 구독
+  // 1. 실시간 데이터 구독
   useEffect(() => {
+    const connectedRef = ref(db, '.info/connected');
     const scheduleRef = ref(db, 'welfareSchedule');
-    const overridesRef = ref(db, 'manualOverrides');
+    const manualRef = ref(db, 'manualOverride');
 
-    const unsubSchedule = onValue(scheduleRef, (snapshot) => {
-      setScheduleData(snapshot.val() || {});
-    });
-
-    const unsubOverrides = onValue(overridesRef, (snapshot) => {
-      setOverrides(snapshot.val() || {});
-    });
+    const unsubConn = onValue(connectedRef, (snap) => setIsConnected(snap.val() === true));
+    const unsubSched = onValue(scheduleRef, (snap) => setScheduleData(snap.val() || {}));
+    const unsubManual = onValue(manualRef, (snap) => setManualOv(snap.val() || {}));
 
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
 
     return () => {
-      unsubSchedule();
-      unsubOverrides();
+      unsubConn();
+      unsubSched();
+      unsubManual();
       clearInterval(timer);
     };
   }, []);
 
-  // 2. 현재 시간 및 요일 정보
-  const days = ["일", "월", "화", "수", "목", "금", "토"];
-  const currentDay = days[currentTime.getDay()];
-  const currentMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
-
+  // 2. 시간 계산 유틸
+  const pad = (n: number) => String(n).padStart(2, '0');
   const toMin = (t: string) => {
+    if (!t) return 0;
     const [h, m] = t.split(':').map(Number);
     return h * 60 + m;
   };
+  const normTime = (t: string) => {
+    const clean = t.replace('\uff1a', ':').trim();
+    const parts = clean.split(':').map(Number);
+    return pad(parts[0]) + ':' + pad(parts[1]);
+  };
 
-  // 3. 실시간 현황 계산 (메모이제이션)
-  const roomStatus = useMemo(() => {
-    return ROOMS.map(roomName => {
-      const manual = overrides[roomName];
-      let isActive = false;
-      let progName = "";
-      let progTime = "";
-      let source = "자동 시간표";
+  const currentDayLabel = DAYS[currentTime.getDay()];
+  const currentMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
 
-      // 수동 제어 우선 순위
-      if (manual && manual.status !== 'auto') {
-        if (manual.status === 'in-use') {
-          isActive = true;
-          progName = manual.name || "프로그램 정보 없음";
-          progTime = manual.time || "";
-          source = "수동 제어";
-        } else if (manual.status === 'available') {
-          isActive = false;
-        }
-      } else {
-        // 자동 시간표 확인
-        const programs = scheduleData[roomName] || [];
-        const currentProg = programs.find(p => 
-          p.day === currentDay && 
-          currentMinutes >= toMin(p.start) && 
-          currentMinutes <= toMin(p.end)
-        );
+  // 3. 실시간 현황 계산
+  const roomStatusList = useMemo(() => {
+    return ROOMS.map(room => {
+      const man = manualOv[room.key];
+      const isManualActive = !!(man && man.active);
+      const progs = scheduleData[room.key] || [];
+      const todayProgs = progs.filter(p => p.day === currentDayLabel);
+      
+      const autoProg = todayProgs.find(p => currentMinutes >= toMin(p.start) && currentMinutes < toMin(p.end));
+      const nextProg = todayProgs
+        .filter(p => toMin(p.start) > currentMinutes)
+        .sort((a, b) => toMin(a.start) - toMin(b.start))[0];
 
-        if (currentProg) {
-          isActive = true;
-          progName = currentProg.name;
-          progTime = `${currentProg.start} ~ ${currentProg.end}`;
-        }
-      }
+      const active = isManualActive ? man : autoProg;
 
-      return { roomName, isActive, progName, progTime, source };
+      return {
+        ...room,
+        isManualActive,
+        active,
+        nextProg,
+        todayCount: todayProgs.length
+      };
     });
-  }, [currentDay, currentMinutes, scheduleData, overrides]);
+  }, [currentTime, scheduleData, manualOv, currentDayLabel, currentMinutes]);
 
-  // 4. 엑셀 업로드 핸들러
-  const handleFileUpload = () => {
+  // 4. 수동 제어 핸들러
+  const handleManualInput = (key: string, field: string, value: string) => {
+    setManualInputs(prev => ({
+      ...prev,
+      [key]: { ...prev[key], [field]: value }
+    }));
+  };
+
+  const applyManual = (key: string) => {
+    const input = manualInputs[key];
+    if (!input.name.trim()) {
+      alert("프로그램명을 입력해주세요.");
+      return;
+    }
+    const data: ManualOverride = {
+      active: true,
+      name: input.name.trim(),
+      start: input.start || '',
+      end: input.end || '',
+      updatedAt: Date.now()
+    };
+    set(ref(db, `manualOverride/${key}`), data)
+      .then(() => {
+        alert(`[${key}] 수동 설정이 적용되었습니다.`);
+      })
+      .catch(err => alert("오류 발생: " + err.message));
+  };
+
+  const clearManual = (key: string) => {
+    remove(ref(db, `manualOverride/${key}`))
+      .then(() => {
+        setManualInputs(prev => ({
+          ...prev,
+          [key]: { name: '', start: '', end: '' }
+        }));
+      });
+  };
+
+  const clearAllManual = () => {
+    if (!confirm('모든 수동 설정을 해제하시겠습니까?')) return;
+    remove(ref(db, 'manualOverride'));
+  };
+
+  // 5. 엑셀 업로드
+  const handleUpload = () => {
     const file = fileInputRef.current?.files?.[0];
     if (!file) {
-      alert("⚠️ 원본 엑셀 파일을 먼저 선택해주세요!");
+      alert("파일을 선택해주세요!");
       return;
     }
 
     setIsUploading(true);
-    setUploadStatus({ message: "⏳ 엑셀 파일을 정밀 분석 중입니다...", type: "loading" });
+    setUploadStatus({ message: "⏳ 엑셀 파일 분석 중...", type: "loading" });
 
     const reader = new FileReader();
     reader.onload = (e) => {
-      setTimeout(() => { // UI 업데이트를 위한 여유 지연
+      setTimeout(() => {
         try {
           const data = new Uint8Array(e.target?.result as ArrayBuffer);
           const workbook = XLSX.read(data, { type: 'array' });
-          const sheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
-
-          const parsedData = parseWelfareExcel(jsonData);
+          const ws = workbook.Sheets[workbook.SheetNames[0]];
+          const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true }) as any[][];
           
-          setUploadStatus({ message: "🚀 클라우드에 전송하고 있습니다...", type: "loading" });
+          const parsed = parseExcel(raw, ws);
+          let totalCount = 0;
+          ROOMS.forEach(r => totalCount += (parsed[r.key] || []).length);
 
-          set(ref(db, 'welfareSchedule'), parsedData)
+          if (totalCount === 0) {
+            throw new Error("분석된 프로그램이 없습니다. 서식을 확인해주세요.");
+          }
+
+          setUploadStatus({ message: "🚀 클라우드 동기화 중...", type: "loading" });
+          set(ref(db, 'welfareSchedule'), parsed)
             .then(() => {
-              setUploadStatus({ message: "✅ 동기화 성공! 모든 화면이 업데이트되었습니다.", type: "success" });
+              setUploadStatus({ message: `✅ 동기화 완료! ${totalCount}개 데이터가 반영되었습니다.`, type: "success" });
               setIsUploading(false);
-              alert("엑셀 시간표가 성공적으로 동기화되었습니다!\n화면 아래의 [데이터 검수하기] 버튼을 눌러보세요.");
-              setTimeout(() => setUploadStatus({ message: "", type: "" }), 5000);
             })
-            .catch((err) => {
-              setUploadStatus({ message: "❌ 전송 실패: " + err.message, type: "error" });
+            .catch(err => {
+              setUploadStatus({ message: "❌ 업로드 실패: " + err.message, type: "error" });
               setIsUploading(false);
             });
-        } catch (error: any) {
-          setUploadStatus({ message: "❌ 오류 발생: " + error.message, type: "error" });
+        } catch (err: any) {
+          setUploadStatus({ message: "❌ 분석 오류: " + err.message, type: "error" });
           setIsUploading(false);
         }
       }, 200);
@@ -155,355 +202,499 @@ export default function App() {
     reader.readAsArrayBuffer(file);
   };
 
-  const parseWelfareExcel = (data: any[][]) => {
-    const result: Record<string, ScheduleItem[]> = {};
-    ROOMS.forEach(r => result[r] = []);
+  const parseExcel = (data: any[][], ws: XLSX.WorkSheet) => {
+    const res: Record<string, ScheduleItem[]> = {};
+    ROOMS.forEach(r => res[r.key] = []);
 
-    let dayRow = -1;
-    let roomRow = -1;
-    
-    // 헤더 위치 스캔
-    for(let i = 0; i < Math.min(15, data.length); i++) {
-        if(data[i] && String(data[i][0] || "").includes("요일")) dayRow = i;
-        if(data[i] && String(data[i][0] || "").includes("구분")) roomRow = i;
+    // 병합셀 확장용 임시 데이터
+    const md = data.map(r => r ? [...r] : []);
+    if (ws['!merges']) {
+      ws['!merges'].forEach(m => {
+        const rs = m.s.r, re = m.e.r, cs = m.s.c, ce = m.e.c;
+        const topVal = (data[rs] && data[rs][cs] !== undefined) ? data[rs][cs] : null;
+        for (let r = rs; r <= re; r++) {
+          for (let c = cs; c <= ce; c++) {
+            if (!md[r]) md[r] = [];
+            if (md[r][c] == null) md[r][c] = topVal;
+          }
+        }
+      });
     }
 
-    if(dayRow === -1) throw new Error("엑셀에서 '요일' 행을 찾을 수 없습니다. 지원 서식을 확인해주세요.");
+    // 헤더 탐색
+    let dayR = -1, roomR = -1;
+    for (let i = 0; i < Math.min(data.length, 15); i++) {
+      const fc = String((data[i] || [])[0] || '').trim();
+      if (fc === '요일') dayR = i;
+      if (fc === '구분') roomR = i;
+    }
 
-    // 요일 매핑
-    let dayMap: Record<number, string> = {};
-    let currentDayLabel = "";
-    data[dayRow].forEach((cell, idx) => {
-      let val = String(cell || "").trim();
-      if(["월","화","수","목","금"].includes(val)) currentDayLabel = val;
-      if(currentDayLabel) dayMap[idx] = currentDayLabel;
+    if (dayR < 0 || roomR < 0) throw new Error("'요일' 또는 '구분' 행을 찾을 수 없습니다.");
+
+    const mdDay = md[dayR] || [];
+    const mdRoom = md[roomR] || [];
+
+    // 방 매핑
+    const rmap: Record<number, string> = {};
+    mdRoom.forEach((cell, idx) => {
+      const raw = String(cell || '').replace(/\n/g, '').replace(/\//g, '').replace(/\s+/g, '');
+      ROOMS.forEach(r => {
+        if (r.keywords.some(kw => raw.indexOf(kw) >= 0)) rmap[idx] = r.key;
+      });
     });
 
     // 데이터 추출
-    for(let r = roomRow + 1; r < data.length; r++) {
-      let timeHeader = String(data[r][0] || "").trim();
-      let timeMatch = timeHeader.match(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/);
-      if(!timeMatch) continue;
+    let cS = '', cE = '';
+    const TIME_PAT = /\d{1,2}[:\uff1a]\d{2}\s*[-~]\s*\d{1,2}[:\uff1a]\d{2}/;
 
-      let rowStart = timeMatch[1].padStart(5, '0');
-      let rowEnd = timeMatch[2].padStart(5, '0');
+    for (let ri = roomR + 1; ri < data.length; ri++) {
+      const row = data[ri] || [];
+      const fc2 = String(row[0] || '').trim();
+      const tm = fc2.match(/(\d{1,2}[:\uff1a]\d{2})\s*[-~]\s*(\d{1,2}[:\uff1a]\d{2})/);
+      
+      if (tm) {
+        cS = normTime(tm[1]);
+        cE = normTime(tm[2]);
+      }
+      if (!cS) continue;
 
-      for(let c = 1; c < data[r].length; c++) {
-        let progName = String(data[r][c] || "").trim();
-        if(!progName || !dayMap[c]) continue;
+      for (let ci = 1; ci < row.length; ci++) {
+        const cv = row[ci];
+        if (cv == null || String(cv).trim() === '') continue;
+        const cs = String(cv).trim();
+        if (/^\d+$/.test(cs) || /^\d+월$/.test(cs) || cs === '개') continue;
 
-        // 방 이름 식별 (빗금/하이픈 유연하게 처리)
-        let rawRoomHeader = String(data[roomRow][c] || "").replace(/\//g, '-').trim();
-        let matchedRoom = ROOMS.find(rn => {
-          const baseName = rn.split('(')[0];
-          return rawRoomHeader.includes(baseName);
-        });
+        const fd = (mdDay[ci] != null) ? String(mdDay[ci]).trim() : null;
+        if (!fd || DAY_LIST.indexOf(fd) < 0) continue;
+        const rk = rmap[ci];
+        if (!rk) continue;
 
-        if(matchedRoom) {
-          let finalStart = rowStart;
-          let finalEnd = rowEnd;
-          
-          // 셀 내부 특수 시간 스캔
-          const innerTime = progName.match(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/);
-          if(innerTime) {
-            finalStart = innerTime[1].padStart(5, '0');
-            finalEnd = innerTime[2].padStart(5, '0');
-          }
+        if (cs.indexOf('예정') >= 0 || cs.indexOf('특강') >= 0) continue;
 
-          let cleanName = progName
-            .replace(/(\d{1,2}:\d{2})\s*[~-]\s*(\d{1,2}:\d{2})/g, '')
-            .replace(/\n/g, ' ')
-            .trim();
-
-          result[matchedRoom].push({
-            day: dayMap[c],
-            start: finalStart,
-            end: finalEnd,
-            name: cleanName
-          });
+        let fs = cS, fe = cE;
+        const inner = cs.match(/(\d{1,2}[:\uff1a]\d{2})\s*[-~]\s*(\d{1,2}[:\uff1a]\d{2})/);
+        if (inner) {
+          fs = normTime(inner[1]);
+          fe = normTime(inner[2]);
         }
+
+        const pn = cs.replace(/(\d{1,2}[:\uff1a]\d{2})\s*[-~]\s*(\d{1,2}[:\uff1a]\d{2})/g, '')
+          .replace(/\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+        if (!pn) continue;
+
+        const isDup = res[rk].some(p => p.day === fd && p.start === fs && p.name === pn);
+        if (!isDup) res[rk].push({ day: fd, start: fs, end: fe, name: pn });
       }
     }
-    return result;
+    return res;
   };
 
-  // 5. 수동 제어 적용
-  const handleManualSet = () => {
-    if (manualStatusType === 'in-use' && (!manualName || !manualTime)) {
-      alert("수동 운영 중일 때는 프로그램명과 시간을 모두 입력해주세요!");
-      return;
-    }
-
-    set(ref(db, `manualOverrides/${manualRoom}`), {
-      status: manualStatusType,
-      name: manualStatusType === 'in-use' ? manualName : null,
-      time: manualStatusType === 'in-use' ? manualTime : null
-    }).then(() => {
-      alert(`[${manualRoom}] 설정이 적용되었습니다.`);
-      if (manualStatusType === 'in-use') {
-        setManualName('');
-        setManualTime('');
-      }
-    });
+  const clearAllSchedule = () => {
+    if (!confirm('저장된 시간표를 모두 삭제하시겠습니까?')) return;
+    remove(ref(db, 'welfareSchedule'))
+      .then(() => setUploadStatus({ message: "🗑 시간표가 초기화되었습니다.", type: "success" }));
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-8 font-sans">
-      <div className="max-w-6xl mx-auto space-y-8">
+    <div className="min-h-screen bg-bg text-[#e8eaf6] p-5 md:p-10 font-sans selection:bg-accent selection:text-white">
+      <div className="max-w-7xl mx-auto space-y-8">
         
-        {/* Header */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        {/* ── Header ── */}
+        <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 border-b border-white/5 pb-6">
           <div className="space-y-1">
-            <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
-              <span className="p-2 bg-blue-600 text-white rounded-xl shadow-lg shadow-blue-200">
-                <Clock size={28} />
-              </span>
-              연희노인복지관 실시간 현황
-            </h1>
-            <p className="text-slate-500 font-medium flex items-center gap-2">
-              <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-              클라우드 실시간 동기화 중
-            </p>
+            <h1 className="font-display text-5xl tracking-wider text-white">YEOHNEE CARE</h1>
+            <p className="text-xs font-bold text-text-dim tracking-[0.2em] uppercase">Program Room Status Board</p>
           </div>
-          
-          <div className="flex items-center gap-4 bg-white px-6 py-4 rounded-2xl shadow-sm border border-slate-100">
-            <div className="text-right">
-              <div className="text-sm font-bold text-slate-400 leading-none mb-1">{currentDay}요일</div>
-              <div className="text-2xl font-mono font-bold text-slate-700 tracking-tighter tabular-nums">
-                {currentTime.toLocaleTimeString('ko-KR', { hour12: false })}
-              </div>
+          <div className="flex flex-col items-end gap-1">
+            <div id="clock-time" className="font-display text-5xl text-accent tracking-[0.1em] tabular-nums">
+              {currentTime.toLocaleTimeString('ko-KR', { hour12: false })}
             </div>
-            <button 
-              onClick={() => setShowAdminPanel(!showAdminPanel)}
-              className={`p-3 rounded-xl transition-all shadow-md ${showAdminPanel ? 'bg-slate-800 text-white' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'}`}
-              title="관리자 설정"
-            >
-              <Settings size={22} />
-            </button>
+            <div className="text-sm font-bold text-text-dim">
+              {currentTime.getFullYear()}.{pad(currentTime.getMonth() + 1)}.{pad(currentTime.getDate())} ({currentDayLabel}요일)
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green animate-pulse shadow-[0_0_8px_rgba(0,214,143,0.5)]' : 'bg-red'}`} />
+              <span className="text-[10px] font-black tracking-widest uppercase opacity-60">
+                {isConnected ? 'Realtime Connected' : 'Sync Disconnected'}
+              </span>
+            </div>
           </div>
         </header>
 
-        {/* Admin Panel */}
-        <AnimatePresence>
-          {showAdminPanel && (
-            <motion.div 
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="grid grid-cols-1 lg:grid-cols-2 gap-6"
-            >
-              {/* Excel Upload Panel */}
-              <div className="bg-amber-50 border-2 border-dashed border-amber-200 rounded-3xl p-8 space-y-6">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xl font-bold text-amber-900 flex items-center gap-2">
-                    <Upload className="text-amber-500" />
-                    ⚙️ 엑셀 통합 시간표 업로드
-                  </h3>
-                </div>
-                <div className="bg-white/60 p-6 rounded-2xl border border-amber-100 space-y-4">
-                  <input 
-                    type="file" 
-                    ref={fileInputRef}
-                    accept=".xlsx, .xls"
-                    className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-bold file:bg-amber-100 file:text-amber-700 hover:file:bg-amber-200 cursor-pointer"
-                  />
-                  <button 
-                    onClick={handleFileUpload}
-                    disabled={isUploading}
-                    className="w-full bg-slate-800 hover:bg-slate-900 disabled:bg-slate-400 text-white py-4 rounded-xl font-bold shadow-xl shadow-slate-200 transition-all active:scale-[0.98]"
-                  >
-                    클라우드 실시간 동기화 시작
-                  </button>
-                    {uploadStatus.message && (
-                    <div className={`p-4 rounded-xl text-sm font-bold flex items-center gap-3 ${
-                        uploadStatus.type === 'loading' ? 'bg-blue-100 text-blue-800' :
-                        uploadStatus.type === 'success' ? 'bg-emerald-100 text-emerald-800' :
-                        'bg-red-100 text-red-800'
-                    }`}>
-                        {uploadStatus.type === 'loading' && <div className="w-4 h-4 border-2 border-blue-800 border-t-transparent rounded-full animate-spin" />}
-                        {uploadStatus.message}
-                    </div>
-                    )}
-                </div>
-                <p className="text-amber-800/60 text-xs font-medium px-2">
-                  * 전용 서식 엑셀 파일을 업로드하면 즉시 모든 사용자의 화면이 갱신됩니다.
-                </p>
-              </div>
-
-              {/* Manual Override Panel */}
-              <div className="bg-blue-50 border-2 border-dashed border-blue-200 rounded-3xl p-8 space-y-6">
-                <h3 className="text-xl font-bold text-blue-900 flex items-center gap-2">
-                  <PlayCircle className="text-blue-500" />
-                  ✍️ 개별 프로그램실 수동 제어
-                </h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-xs font-bold text-blue-400 ml-1">방 선택</label>
-                    <select 
-                      value={manualRoom} 
-                      onChange={(e) => setManualRoom(e.target.value)}
-                      className="w-full bg-white border border-blue-100 px-4 py-3 rounded-xl font-bold text-slate-700 outline-none focus:ring-2 focus:ring-blue-400 transition-all"
-                    >
-                      {ROOMS.map(r => <option key={r} value={r}>{r}</option>)}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-bold text-blue-400 ml-1">상태 선택</label>
-                    <select 
-                      value={manualStatusType}
-                      onChange={(e) => setManualStatusType(e.target.value as any)}
-                      className="w-full bg-white border border-blue-100 px-4 py-3 rounded-xl font-bold text-slate-700 outline-none focus:ring-2 focus:ring-blue-400 transition-all"
-                    >
-                      <option value="auto">자동 (시간표)</option>
-                      <option value="available">강제 비움</option>
-                      <option value="in-use">수동 입력 (운영중)</option>
-                    </select>
-                  </div>
-                </div>
-
-                {manualStatusType === 'in-use' && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in zoom-in-95 duration-200">
-                    <input 
-                      type="text" 
-                      placeholder="프로그램명" 
-                      value={manualName}
-                      onChange={(e) => setManualName(e.target.value)}
-                      className="bg-white border border-blue-100 px-4 py-3 rounded-xl font-medium outline-none focus:ring-2 focus:ring-blue-400"
-                    />
-                    <input 
-                      type="text" 
-                      placeholder="시간 (예: 14:00~15:00)" 
-                      value={manualTime}
-                      onChange={(e) => setManualTime(e.target.value)}
-                      className="bg-white border border-blue-100 px-4 py-3 rounded-xl font-medium outline-none focus:ring-2 focus:ring-blue-400"
-                    />
-                  </div>
-                )}
-
-                <button 
-                  onClick={handleManualSet}
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white py-4 rounded-xl font-bold shadow-xl shadow-blue-200 transition-all active:scale-[0.98]"
-                >
-                  수동 상태 적용하기
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Dashboard Grid */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-          {roomStatus.map((status, idx) => (
-            <motion.div
-              layout
-              key={status.roomName}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: idx * 0.1 }}
-              className={`relative overflow-hidden group bg-white p-6 rounded-[2rem] border-2 transition-all duration-300 shadow-sm hover:shadow-xl hover:-translate-y-1 ${
-                status.isActive ? 'border-blue-500 ring-4 ring-blue-500/10' : 'border-slate-100'
+        {/* ── Tabs ── */}
+        <div className="flex p-1 bg-surface rounded-2xl w-fit shadow-2xl border border-white/5">
+          {[
+            { id: 'dashboard', label: '📺 실시간 현황' },
+            { id: 'manual', label: '🎛 수동 제어' },
+            { id: 'upload', label: '📤 시간표 업로드' },
+            { id: 'check', label: '🔍 데이터 검수' }
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as TabType)}
+              className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 ${
+                activeTab === tab.id 
+                  ? 'bg-surface-3 text-white shadow-inner' 
+                  : 'text-text-dim hover:text-white'
               }`}
             >
-              <div className="flex justify-between items-start mb-6">
-                <div className="flex flex-col">
-                  <span className={`text-[10px] font-black uppercase tracking-widest mb-1 ${status.isActive ? 'text-blue-500' : 'text-slate-400 text-[9px]'}`}>
-                    {status.source}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <MapPin size={14} className={status.isActive ? 'text-blue-400' : 'text-slate-400'} />
-                    <h2 className="text-xl font-black text-slate-800 tracking-tight">{status.roomName}</h2>
-                  </div>
-                </div>
-                {status.isActive ? (
-                  <div className="bg-blue-500 p-2 rounded-full text-white shadow-lg shadow-blue-200 animate-pulse">
-                    <PlayCircle size={20} />
-                  </div>
-                ) : (
-                  <div className="bg-slate-100 p-2 rounded-full text-slate-300">
-                    <CheckCircle2 size={20} />
-                  </div>
-                )}
-              </div>
-
-              <div className={`p-6 rounded-[1.5rem] transition-colors duration-500 flex flex-col items-center text-center gap-3 ${
-                status.isActive ? 'bg-blue-600 text-white' : 'bg-slate-50 text-slate-400'
-              }`}>
-                {status.isActive ? (
-                  <>
-                    <span className="text-sm font-black uppercase tracking-tighter opacity-80">운영 중</span>
-                    <div className="space-y-1">
-                      <div className="text-lg font-bold leading-tight line-clamp-2">{status.progName}</div>
-                      <div className="text-xs font-mono opacity-80">{status.progTime}</div>
-                    </div>
-                  </>
-                ) : (
-                  <span className="text-lg font-black tracking-tight">사용 가능</span>
-                )}
-              </div>
-            </motion.div>
-          ))}
-        </section>
-
-        {/* Data Inspection Section */}
-        <div className="pt-8 space-y-6 text-center">
-            <button 
-              onClick={() => setShowTimetable(!showTimetable)}
-              className="group inline-flex items-center gap-3 bg-slate-100 hover:bg-slate-800 hover:text-white text-slate-600 px-8 py-4 rounded-2xl font-black transition-all shadow-lg active:scale-95"
-            >
-              <Database size={20} className={showTimetable ? 'text-blue-400' : 'text-slate-400'} />
-              👀 클라우드 전체 데이터 검수하기
-              {showTimetable ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+              {tab.label}
             </button>
+          ))}
+        </div>
 
-          <AnimatePresence>
-            {showTimetable && (
+        {/* ── Tab Content ── */}
+        <div className="min-h-[60vh]">
+          <AnimatePresence mode="wait">
+            
+            {/* Dashboard Tab */}
+            {activeTab === 'dashboard' && (
               <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                className="overflow-hidden mt-6"
+                key="dashboard"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
               >
-                <div className="bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden max-w-4xl mx-auto">
-                  <div className="overflow-x-auto">
-                    <table className="w-full border-collapse">
-                      <thead>
-                        <tr className="bg-slate-800 text-white text-[11px] font-black uppercase tracking-wider">
-                          <th className="py-4 px-6 text-left">방 이름</th>
-                          <th className="py-4 px-6 text-center">요일</th>
-                          <th className="py-4 px-6 text-center">운영 시간</th>
-                          <th className="py-4 px-6 text-left">프로그램명</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(Object.entries(scheduleData) as [string, ScheduleItem[]][]).flatMap(([room, progs]) => 
-                          progs.map((p, i) => (
-                            <tr key={`${room}-${i}`} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors text-slate-600">
-                              <td className="py-4 px-6 font-bold text-slate-700">{room}</td>
-                              <td className="py-4 px-6 text-center">
-                                <span className="inline-block px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-bold text-xs uppercase">{p.day}</span>
-                              </td>
-                              <td className="py-4 px-6 text-center text-xs font-mono font-medium">
-                                {p.start} ~ {p.end}
-                              </td>
-                              <td className="py-4 px-6 text-sm font-semibold">{p.name}</td>
-                            </tr>
-                          ))
-                        )}
-                        {(Object.values(scheduleData) as ScheduleItem[][]).every(progs => progs.length === 0) && (
-                          <tr>
-                            <td colSpan={4} className="py-12 text-center text-slate-400 italic">
-                              데이터가 없습니다. 엑셀 파일을 업로드해주세요.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                {!isConnected && (
+                  <div className="bg-red/10 border border-red/20 px-4 py-3 rounded-xl text-red text-sm font-bold animate-in fade-in zoom-in-95">
+                    ⚠ Firebase 연결이 끊겼습니다. 오프라인 모드로 작동 중입니다.
                   </div>
+                )}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {roomStatusList.map((room) => (
+                    <div 
+                      key={room.key}
+                      className={`group bg-surface rounded-2xl border transition-all duration-300 ${
+                        room.isManualActive 
+                          ? 'border-purple/30 shadow-[0_0_30px_rgba(176,132,247,0.1)]' 
+                          : 'border-white/[0.05] hover:border-white/10'
+                      }`}
+                    >
+                      <div className="p-4 border-b border-white/[0.05] flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full" style={{ background: room.color }} />
+                          <h3 className="font-bold text-sm">{room.label}</h3>
+                        </div>
+                        {room.isManualActive && (
+                          <span className="text-[10px] font-black bg-purple/10 text-purple px-2 py-0.5 rounded-full uppercase tracking-widest">Manual</span>
+                        )}
+                        <span className="text-[10px] font-bold text-text-dim bg-surface-2 px-2 py-0.5 rounded-full uppercase">{room.floor}</span>
+                      </div>
+                      <div className="p-5 space-y-4">
+                        <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase ${
+                          room.active ? (room.isManualActive ? 'bg-purple/10 text-purple' : 'bg-accent/10 text-accent') : 'bg-green/10 text-green'
+                        }`}>
+                          <div className={`w-1.5 h-1.5 rounded-full bg-current ${room.active ? 'animate-pulse' : ''}`} />
+                          {room.active ? 'In Use' : 'Available'}
+                        </div>
+                        <div className="min-h-[3rem]">
+                          {room.active ? (
+                            <div className="space-y-1">
+                              <h4 className="text-xl font-bold leading-tight line-clamp-2">{room.active.name}</h4>
+                              <p className="text-xs font-bold text-text-dim tabular-nums">⏱ {room.active.start} ~ {room.active.end}</p>
+                            </div>
+                          ) : (
+                            <p className="text-lg font-medium text-text-dim">현재 운영 중인 프로그램이 없습니다.</p>
+                          )}
+                        </div>
+                        <div className="pt-4 border-t border-white/[0.05] flex flex-col gap-2">
+                          {room.nextProg ? (
+                            <p className="text-[10px] text-text-dim font-bold">
+                              NEXT: <span className="text-yellow">{room.nextProg.name}</span> ({room.nextProg.start}~{room.nextProg.end})
+                            </p>
+                          ) : (
+                            <p className="text-[10px] text-text-dim font-bold uppercase tracking-widest opacity-40">No Upcoming Today</p>
+                          )}
+                          <div className="flex gap-2 pt-1">
+                            {room.isManualActive ? (
+                              <button 
+                                onClick={() => clearManual(room.key)}
+                                className="flex-1 bg-surface-2 hover:bg-red/10 hover:text-red p-2 rounded-xl text-[10px] font-black transition-all"
+                              >
+                                ✕ 수동 해제
+                              </button>
+                            ) : (
+                              <button 
+                                onClick={() => { setActiveTab('manual'); setTimeout(() => document.getElementById(`mn-name-${room.key}`)?.focus(), 150); }}
+                                className="flex-1 bg-surface-2 hover:bg-accent/10 hover:text-accent p-2 rounded-xl text-[10px] font-black transition-all"
+                              >
+                                ✏ 수동 설정
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </motion.div>
             )}
+
+            {/* Manual Control Tab */}
+            {activeTab === 'manual' && (
+              <motion.div
+                key="manual"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+              >
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-surface/50 p-6 rounded-3xl border border-white/5">
+                  <p className="text-sm font-medium text-text-dim">
+                    실시간 현황판에 특정 프로그램을 즉시 노출하고 싶을 때 사용합니다.<br/>
+                    설정 즉시 모든 연결된 화면에 반영되며, 수동 해제 전까지는 자동 시간표보다 우선 상위 노출됩니다.
+                  </p>
+                  <button 
+                    onClick={clearAllManual}
+                    className="bg-red/10 text-red hover:bg-red/20 border border-red/20 px-6 py-2.5 rounded-xl text-sm font-black transition-all"
+                  >
+                    🗑 모든 수동 제어 전체 해제
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {ROOMS.map((room) => {
+                    const isManual = !!manualOv[room.key]?.active;
+                    return (
+                      <div key={room.key} className={`bg-surface p-6 rounded-3xl border ${isManual ? 'border-purple/30' : 'border-white/5'} space-y-6`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-2.5 h-2.5 rounded-full shadow-lg" style={{ background: room.color, boxShadow: `0 0 15px ${room.color}44` }} />
+                            <h3 className="text-xl font-bold">{room.label}</h3>
+                          </div>
+                          {isManual && (
+                            <span className="text-[10px] font-black bg-purple/10 text-purple px-3 py-1 rounded-full uppercase tracking-widest border border-purple/20">Active Manual Control</span>
+                          )}
+                        </div>
+                        
+                        {isManual && (
+                          <div className="bg-purple/5 border border-purple/10 rounded-2xl p-4 animate-in zoom-in-95">
+                            <p className="text-xs font-bold text-purple uppercase tracking-widest mb-2 opacity-60">현재 수동 운영 중</p>
+                            <h4 className="text-lg font-bold">{manualOv[room.key].name}</h4>
+                            <p className="text-xs font-medium text-text-dim">{manualOv[room.key].start} ~ {manualOv[room.key].end}</p>
+                          </div>
+                        )}
+
+                        <div className="space-y-4">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-black text-text-dim uppercase tracking-widest ml-1">프로그램명</label>
+                            <input 
+                              id={`mn-name-${room.key}`}
+                              type="text" 
+                              placeholder="예: 노래교실, 긴급 행사..."
+                              value={manualInputs[room.key].name}
+                              onChange={(e) => handleManualInput(room.key, 'name', e.target.value)}
+                              className="w-full bg-surface-2 border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-1.5">
+                              <label className="text-[10px] font-black text-text-dim uppercase tracking-widest ml-1">시작 시간</label>
+                              <input 
+                                type="time" 
+                                value={manualInputs[room.key].start}
+                                onChange={(e) => handleManualInput(room.key, 'start', e.target.value)}
+                                className="w-full bg-surface-2 border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <label className="text-[10px] font-black text-text-dim uppercase tracking-widest ml-1">종료 시간</label>
+                              <input 
+                                type="time" 
+                                value={manualInputs[room.key].end}
+                                onChange={(e) => handleManualInput(room.key, 'end', e.target.value)}
+                                className="w-full bg-surface-2 border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                            <button 
+                              onClick={() => applyManual(room.key)}
+                              className="flex-[2] bg-accent hover:bg-accent/90 text-white p-3.5 rounded-xl font-black text-sm transition-all active:scale-95 shadow-lg shadow-accent/20"
+                            >
+                              설정 적용
+                            </button>
+                            <button 
+                              onClick={() => clearManual(room.key)}
+                              disabled={!isManual}
+                              className={`flex-1 p-3.5 rounded-xl font-black text-sm transition-all ${
+                                isManual ? 'bg-surface-2 text-white hover:bg-red/10 hover:text-red active:scale-95' : 'bg-white/5 text-white/20'
+                              }`}
+                            >
+                              해제
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </motion.div>
+            )}
+
+            {/* Upload Tab */}
+            {activeTab === 'upload' && (
+              <motion.div
+                key="upload"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="max-w-3xl mx-auto space-y-6"
+              >
+                <div className="bg-surface p-10 rounded-[2.5rem] border border-white/5 shadow-2xl relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-1 h-full bg-accent" />
+                  <div className="space-y-8">
+                    <div className="space-y-2">
+                        <h3 className="text-3xl font-black text-white">시간표 클라우드 동기화</h3>
+                        <p className="text-text-dim text-sm font-medium">관리용 주간 시간표 엑셀 파일을 업로드하여 모든 현황판을 즉시 업데이트합니다.</p>
+                    </div>
+                    
+                    <div className="bg-surface-2/50 border-2 border-dashed border-white/10 rounded-3xl p-10 flex flex-col items-center gap-6 group hover:border-accent/40 transition-all">
+                        <div className="p-5 bg-accent/10 text-accent rounded-full group-hover:scale-110 transition-transform">
+                            <Upload size={40} />
+                        </div>
+                        <input 
+                            type="file" 
+                            ref={fileInputRef}
+                            accept=".xlsx, .xls"
+                            className="text-sm font-medium text-text-dim file:mr-6 file:py-3 file:px-6 file:rounded-xl file:border-0 file:bg-surface-3 file:text-white file:font-bold hover:file:bg-accent transition-all cursor-pointer"
+                        />
+                        <div className="text-center space-y-1">
+                            <p className="text-xs font-bold text-text-dim">파일 지원: Microsoft Excel (.xlsx, .xls)</p>
+                            <p className="text-xs font-bold text-accent/50">첫 번째 시트의 내용을 자동으로 분석합니다.</p>
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col gap-3">
+                        <button 
+                            onClick={handleUpload}
+                            disabled={isUploading}
+                            className="w-full bg-accent hover:bg-accent/90 disabled:bg-surface-3 disabled:text-text-dim p-4.5 rounded-2xl font-black text-lg shadow-xl shadow-accent/20 transition-all active:scale-95"
+                        >
+                            {isUploading ? '분석 중...' : '클라우드로 데이터 전송'}
+                        </button>
+                        <button 
+                            onClick={clearAllSchedule}
+                            className="w-full bg-white/5 hover:bg-red/10 hover:text-red p-3 rounded-xl text-xs font-bold text-text-dim transition-all"
+                        >
+                            저장된 통합 시간표 전체 초기화
+                        </button>
+                    </div>
+
+                    {uploadStatus.message && (
+                    <motion.div 
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className={`p-4 rounded-xl text-sm font-bold flex items-center gap-3 ${
+                            uploadStatus.type === 'loading' ? 'bg-accent/10 text-accent border border-accent/20' :
+                            uploadStatus.type === 'success' ? 'bg-green/10 text-green border border-green/20' :
+                            'bg-red/10 text-red border border-red/20'
+                        }`}
+                    >
+                        {uploadStatus.type === 'loading' && <div className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />}
+                        {uploadStatus.message}
+                    </motion.div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-surface/30 p-8 rounded-3xl border border-white/5 space-y-4">
+                    <h4 className="text-xs font-black text-text-dim uppercase tracking-[0.2em] flex items-center gap-2">
+                        <Database size={14} />
+                        Guidelines for Excel Format
+                    </h4>
+                    <ul className="text-xs text-text-dim font-medium space-y-2 list-disc ml-5 leading-loose">
+                        <li>복지관 전체 시간표 서식에서 <strong>'요일'</strong> 행과 <strong>'구분'</strong> 행을 반드시 포함해야 합니다.</li>
+                        <li>방 이름 키워드(어울림실, 청춘나래 등)가 포함된 열을 자동으로 인식합니다.</li>
+                        <li>엑셀의 <strong>병합된 셀</strong>도 스마트하게 인식하여 모든 시간대에 프로그램이 매핑됩니다.</li>
+                        <li>업로드가 완료되면 실시간 대시보드 및 검수 탭에서 확인 가능합니다.</li>
+                    </ul>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Check Tab */}
+            {activeTab === 'check' && (
+              <motion.div
+                key="check"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+              >
+                <div className="flex items-center justify-between">
+                    <h3 className="text-xl font-black text-white flex items-center gap-3">
+                        <Database className="text-accent" />
+                        클라우드 통합 데이터 검수
+                    </h3>
+                    <div className="px-5 py-2.5 bg-accent/10 border border-accent/20 rounded-full text-accent text-sm font-black tabular-nums">
+                        총 {Object.values(scheduleData).flat().length}개 프로그램 동기화 중
+                    </div>
+                </div>
+
+                <div className="bg-surface rounded-3xl border border-white/5 overflow-hidden shadow-2xl">
+                    <div className="overflow-x-auto">
+                        <table className="w-full border-collapse">
+                            <thead>
+                                <tr className="bg-surface-2 text-text-dim text-[11px] font-black uppercase tracking-wider">
+                                    <th className="py-5 px-6 text-left">Room</th>
+                                    <th className="py-5 px-6 text-center">Day</th>
+                                    <th className="py-5 px-6 text-center">Schedule</th>
+                                    <th className="py-5 px-6 text-left">Program Name</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                                {(Object.entries(scheduleData) as [string, ScheduleItem[]][]).flatMap(([roomName, progs]) => 
+                                    progs.sort((a,b) => (DAY_LIST.indexOf(a.day) - DAY_LIST.indexOf(b.day)) || (toMin(a.start) - toMin(b.start))).map((p, i) => (
+                                        <tr key={`${roomName}-${i}`} className="hover:bg-white/[0.02] transition-colors">
+                                            <td className="py-4 px-6">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="w-2 h-2 rounded-full" style={{ background: ROOMS.find(r => r.key === roomName)?.color }} />
+                                                    <span className="font-black text-sm">{roomName}</span>
+                                                </div>
+                                            </td>
+                                            <td className="py-4 px-6 text-center">
+                                                <span className="inline-block px-3 py-1 rounded-lg text-[10px] font-black uppercase" style={{ background: (DAY_CLR[p.day] || '#888') + '22', color: DAY_CLR[p.day] }}>
+                                                    {p.day}
+                                                </span>
+                                            </td>
+                                            <td className="py-4 px-6 text-center text-xs font-mono text-text-dim tracking-tight tabular-nums">
+                                                {p.start} ~ {p.end}
+                                            </td>
+                                            <td className="py-4 px-6">
+                                                <div className="text-sm font-bold text-white/80">{p.name}</div>
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                                {Object.values(scheduleData).flat().length === 0 && (
+                                    <tr>
+                                        <td colSpan={4} className="py-24 text-center">
+                                            <div className="flex flex-col items-center gap-4 opacity-20">
+                                                <Database size={60} strokeWidth={1} />
+                                                <p className="text-lg font-medium italic">클라우드에 저장된 데이터가 없습니다.</p>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+              </motion.div>
+            )}
+
           </AnimatePresence>
         </div>
+
+        {/* ── Footer ── */}
+        <footer className="pt-20 pb-10 flex flex-col items-center gap-4 border-t border-white/5 opacity-40">
+            <p className="text-[10px] font-black tracking-[0.3em] uppercase">Built for Yeonhee Senior Welfare Center</p>
+            <div className="flex gap-6 text-[10px] font-bold">
+                <span className="hover:text-accent cursor-default transition-colors">REALTIME ENGINE LIVE</span>
+                <span className="hover:text-accent cursor-default transition-colors">v2.0 CLOUD SYNCED</span>
+            </div>
+        </footer>
 
       </div>
     </div>

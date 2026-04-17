@@ -1,12 +1,25 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=Bebas+Neue&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Noto Sans KR", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bebas Neue", cursive;
+  
+  --color-bg: #0f1117;
+  --color-surface: #1a1d27;
+  --color-surface-2: #22263a;
+  --color-surface-3: #2a2f45;
+  --color-text-dim: #7b80a0;
+  --color-accent: #4f8ef7;
+  --color-green: #00d68f;
+  --color-orange: #ff7043;
+  --color-yellow: #ffd740;
+  --color-purple: #b084f7;
+  --color-red: #f74f4f;
 }
 
 @layer base {
   body {
-    @apply font-sans antialiased;
+    @apply font-sans antialiased bg-bg text-[#e8eaf6];
   }
 }
