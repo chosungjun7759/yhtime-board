@@ -262,14 +262,16 @@ export default function App() {
         const cv = row[ci];
         if (cv == null || String(cv).trim() === '') continue;
         const cs = String(cv).trim();
+        // 👉 [핵심 수정 부분] 쓰레기 데이터 걸러내기
         if (/^\d+$/.test(cs) || /^\d+월$/.test(cs) || cs === '개') continue;
+        // '정원', '16석', '20명' 등의 좌석/인원수 관련 단어 무시
+        if (cs === '정원' || /^\d+석$/.test(cs) || /^\d+명$/.test(cs)) continue;
+        if (cs.indexOf('예정') >= 0 || cs.indexOf('특강') >= 0) continue;
 
         const fd = (mdDay[ci] != null) ? String(mdDay[ci]).trim() : null;
         if (!fd || DAY_LIST.indexOf(fd) < 0) continue;
         const rk = rmap[ci];
         if (!rk) continue;
-
-        if (cs.indexOf('예정') >= 0 || cs.indexOf('특강') >= 0) continue;
 
         let fs = cS, fe = cE;
         const inner = cs.match(/(\d{1,2}[:\uff1a]\d{2})\s*[-~]\s*(\d{1,2}[:\uff1a]\d{2})/);
